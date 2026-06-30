@@ -100,6 +100,24 @@ function parseAttributes(block: string): Record<string, string> {
   return attrs;
 }
 
+const PRICING_CATALOG_DATE = '2025-06-15';
+const PRICING_SOURCE = 'TerraPilot internal on-demand catalog (Alibaba Cloud + AWS sample regions)';
+
+export function getPricingCatalogMeta() {
+  return {
+    source: PRICING_SOURCE,
+    updatedAt: PRICING_CATALOG_DATE,
+    supportedClouds: ['alicloud', 'aws'] as Cloud[],
+    supportedRegions: ['cn-hangzhou', 'cn-beijing', 'us-east-1', 'us-west-2'],
+    formula: 'monthlyUsd = hourlyUsd × 730',
+    confidenceLevels: {
+      verified: 'Exact match in internal pricing catalog.',
+      estimated: 'Derived from family-level heuristic; not a live API quote.',
+      unknown: 'Resource type not supported by current catalog.',
+    },
+  };
+}
+
 export function getInstancePricing(args: { instanceType: string; cloud?: string }): PricingResult {
   const cloud = (args.cloud as Cloud) || 'unknown';
   const entry = PRICING.find(
@@ -112,15 +130,30 @@ export function getInstancePricing(args: { instanceType: string; cloud?: string 
       monthlyUsd: entry.monthlyUsd,
       category: entry.category,
       estimated: false,
+      confidence: 'verified',
+      source: PRICING_SOURCE,
     };
   }
   const estimate = heuristicEstimate(args.instanceType);
+  if (estimate == null) {
+    return {
+      instanceType: args.instanceType,
+      cloud: cloud === 'unknown' ? 'unknown' : cloud,
+      monthlyUsd: null,
+      category: 'unknown',
+      estimated: true,
+      confidence: 'unknown',
+      source: PRICING_SOURCE,
+    };
+  }
   return {
     instanceType: args.instanceType,
     cloud: cloud === 'unknown' ? 'unknown' : cloud,
     monthlyUsd: estimate,
     category: 'estimated',
     estimated: true,
+    confidence: 'estimated',
+    source: `${PRICING_SOURCE} (heuristic)`,
   };
 }
 

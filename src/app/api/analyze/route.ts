@@ -24,8 +24,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<AnalyzeRespon
       diff,
       proposalToken: proposal.token,
       contentHash: proposal.contentHash,
+      originalHash: proposal.originalHash,
+      optimizedHash: proposal.optimizedHash,
       pipelineStatus: 'proposed',
       planLogs,
+      expiresAt: proposal.expiresAt,
     };
     return NextResponse.json(response);
   } catch (error: unknown) {

@@ -26,7 +26,9 @@ import type {
   DiffHunk,
   DiffResult,
   DiffLine,
+  Finding,
   PipelineStatus,
+  ToolCallTrace,
 } from '@/lib/types';
 
 const SAMPLE_TERRAFORM = `# TerraPilot Hackathon Demo Manifest
@@ -85,26 +87,20 @@ resource "alicloud_security_group_rule" "allow_ssh" {
 }
 `;
 
-interface Finding {
-  resource: string;
-  issue: string;
-  severity: 'critical' | 'warning' | 'info';
-  current: string;
-  recommended: string;
-  costSavings: number;
-  rationale: string;
-}
-
 interface AnalyzeResponse {
   summary: string;
   estimatedSavings: number;
   findings: Finding[];
   optimized_terraform: string;
+  trace: ToolCallTrace[];
   diff: DiffResult;
   proposalToken: string;
   contentHash: string;
+  originalHash: string;
+  optimizedHash: string;
   pipelineStatus: PipelineStatus;
   planLogs: string[];
+  expiresAt: number;
   _debug?: string;
 }
 
@@ -119,6 +115,13 @@ const PREVIEW_FINDINGS: Finding[] = [
     recommended: 'ecs.g7.large',
     costSavings: 342,
     rationale: 'Run analysis to replace this preview with Qwen Cloud reasoning.',
+    evidence: [
+      {
+        type: 'pricing',
+        description: 'Preview: verified pricing will appear after analysis.',
+        callIds: [],
+      },
+    ],
   },
   {
     resource: 'Database class',
@@ -128,6 +131,13 @@ const PREVIEW_FINDINGS: Finding[] = [
     recommended: 'pg.g7.large',
     costSavings: 486,
     rationale: 'Run analysis to replace this preview with Qwen Cloud reasoning.',
+    evidence: [
+      {
+        type: 'pricing',
+        description: 'Preview: verified pricing will appear after analysis.',
+        callIds: [],
+      },
+    ],
   },
   {
     resource: 'SSH exposure',
@@ -137,6 +147,13 @@ const PREVIEW_FINDINGS: Finding[] = [
     recommended: '10.0.0.0/8',
     costSavings: 0,
     rationale: 'Run analysis to replace this preview with Qwen Cloud reasoning.',
+    evidence: [
+      {
+        type: 'security',
+        description: 'Preview: security rule scan will appear after analysis.',
+        callIds: [],
+      },
+    ],
   },
 ];
 
@@ -147,10 +164,11 @@ export default function Dashboard() {
   const [result, setResult] = useState<AnalyzeResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const [activeTab, setActiveTab] = useState<'findings' | 'diff'>('findings');
+  const [activeTab, setActiveTab] = useState<'findings' | 'diff' | 'trace'>('findings');
   const [logs, setLogs] = useState<string[]>(['Ready for analysis.']);
   const [pipelineStatus, setPipelineStatus] = useState<PipelineStatus>('idle');
   const [pipelineBusy, setPipelineBusy] = useState(false);
+  const [prUrl, setPrUrl] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -173,6 +191,7 @@ export default function Dashboard() {
     setLoading(true);
     setError(null);
     setResult(null);
+    setPrUrl(null);
     setActiveTab('findings');
     setLoadingStep(0);
     setPipelineStatus('analyzing');
@@ -198,7 +217,13 @@ export default function Dashboard() {
 
       setResult(data);
       setPipelineStatus('proposed');
-      setLogs(['Analysis complete.', `Optimization brief generated (token ${data.proposalToken.slice(0, 8)}…).`, ...data.planLogs, '', 'Awaiting human approval.']);
+      setLogs([
+        'Analysis complete.',
+        `Optimization brief generated (proposal ${data.contentHash}, expires ${new Date(data.expiresAt).toLocaleTimeString()}).`,
+        ...data.planLogs,
+        '',
+        'Awaiting human approval.',
+      ]);
     } catch (err: unknown) {
       console.error(err);
       setError(err instanceof Error ? err.message : 'An unexpected error occurred during analysis.');
@@ -217,7 +242,7 @@ export default function Dashboard() {
       const res = await fetch('/api/approve', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: result.proposalToken }),
+        body: JSON.stringify({ token: result.proposalToken, approvedBy: 'operator' }),
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
@@ -236,17 +261,18 @@ export default function Dashboard() {
     if (!result?.proposalToken) return;
     setPipelineBusy(true);
     setPipelineStatus('applying');
-    setLogs((prev) => [...prev, '[HITL] Approval token verified. Launching apply simulation…']);
+    setLogs((prev) => [...prev, '[HITL] Approval token verified. Opening reviewable GitHub PR…']);
     try {
       const res = await fetch('/api/apply', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: result.proposalToken }),
       });
-      const body = (await res.json().catch(() => ({}))) as { logs?: string[]; error?: string };
+      const body = (await res.json().catch(() => ({}))) as { logs?: string[]; prUrl?: string; error?: string };
       if (!res.ok) throw new Error(body.error || 'Apply failed');
       setPipelineStatus('applied');
-      setLogs((prev) => [...prev, ...(body.logs ?? []), '', '[TerraPilot] Apply simulation verified. No production resources changed.']);
+      if (body.prUrl) setPrUrl(body.prUrl);
+      setLogs((prev) => [...prev, ...(body.logs ?? []), '', '[TerraPilot] Reviewable change created. No cloud resources modified directly.']);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Apply failed');
       setPipelineStatus('approved');
@@ -376,6 +402,12 @@ export default function Dashboard() {
                   >
                     Diff
                   </button>
+                  <button
+                    onClick={() => setActiveTab('trace')}
+                    className={`rounded-lg px-3 py-2 text-sm font-semibold transition ${activeTab === 'trace' ? 'bg-white text-[#5b2eea] shadow-sm' : 'text-[#606571]'}`}
+                  >
+                    Agent trace
+                  </button>
                 </div>
               </div>
 
@@ -385,7 +417,7 @@ export default function Dashboard() {
                     <FindingCard key={`${finding.resource}-${idx}`} finding={finding} />
                   ))}
                 </div>
-              ) : (
+              ) : activeTab === 'diff' ? (
                 <div>
                   <div className="flex items-center justify-between border-b border-[#ececf1] px-5 py-3">
                     <div className="flex items-center gap-2 text-sm font-bold">
@@ -414,6 +446,8 @@ export default function Dashboard() {
                     )}
                   </div>
                 </div>
+              ) : (
+                <AgentTrace trace={result?.trace ?? []} />
               )}
             </div>
 
@@ -423,23 +457,35 @@ export default function Dashboard() {
                   <h2 className="font-black tracking-[-0.025em]">Execution pipeline</h2>
                   <p className="mt-1 text-sm text-[#6f7480]">{pipelineLabel(pipelineStatus)}</p>
                 </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={approvePlan}
-                    disabled={pipelineStatus !== 'proposed' || pipelineBusy}
-                    className="rounded-xl border border-[#dedee7] bg-white px-4 py-3 text-sm font-bold text-[#111318] transition hover:bg-[#f7f7fa] disabled:pointer-events-none disabled:opacity-40"
-                  >
-                    <ShieldCheck className="mr-2 inline h-4 w-4" />
-                    {pipelineStatus === 'approved' || pipelineStatus === 'applied' ? 'Approved' : 'Approve plan'}
-                  </button>
-                  <button
-                    onClick={applyChanges}
-                    disabled={pipelineStatus !== 'approved' || pipelineBusy}
-                    className="rounded-xl bg-[#159557] px-4 py-3 text-sm font-bold text-white transition hover:bg-[#128049] disabled:pointer-events-none disabled:opacity-40"
-                  >
-                    {pipelineBusy && pipelineStatus === 'applying' ? <RefreshCw className="mr-2 inline h-4 w-4 animate-spin" /> : <Play className="mr-2 inline h-4 w-4 fill-current" />}
-                    {pipelineStatus === 'applied' ? 'Verified' : 'Apply changes'}
-                  </button>
+                <div className="flex flex-col gap-2">
+                  <div className="flex gap-2">
+                    <button
+                      onClick={approvePlan}
+                      disabled={pipelineStatus !== 'proposed' || pipelineBusy}
+                      className="rounded-xl border border-[#dedee7] bg-white px-4 py-3 text-sm font-bold text-[#111318] transition hover:bg-[#f7f7fa] disabled:pointer-events-none disabled:opacity-40"
+                    >
+                      <ShieldCheck className="mr-2 inline h-4 w-4" />
+                      {pipelineStatus === 'approved' || pipelineStatus === 'applied' ? 'Approved' : 'Approve plan'}
+                    </button>
+                    <button
+                      onClick={applyChanges}
+                      disabled={pipelineStatus !== 'approved' || pipelineBusy}
+                      className="rounded-xl bg-[#159557] px-4 py-3 text-sm font-bold text-white transition hover:bg-[#128049] disabled:pointer-events-none disabled:opacity-40"
+                    >
+                      {pipelineBusy && pipelineStatus === 'applying' ? <RefreshCw className="mr-2 inline h-4 w-4 animate-spin" /> : <Play className="mr-2 inline h-4 w-4 fill-current" />}
+                      {pipelineStatus === 'applied' ? 'PR created' : 'Create PR'}
+                    </button>
+                  </div>
+                  {prUrl && (
+                    <a
+                      href={prUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs font-semibold text-[#7446f3] hover:underline"
+                    >
+                      Open GitHub PR →
+                    </a>
+                  )}
                 </div>
               </div>
 
@@ -473,13 +519,13 @@ function pipelineLabel(status: PipelineStatus): string {
     case 'analyzing':
       return 'Agent is analyzing infrastructure…';
     case 'proposed':
-      return 'Plan proposed. A human must approve before apply.';
+      return 'Plan proposed. A human must approve before creating a reviewable PR.';
     case 'approved':
-      return 'Plan approved. Ready to apply.';
+      return 'Plan approved. Ready to create GitHub PR.';
     case 'applying':
-      return 'Applying approved changes (sandbox simulation)…';
+      return 'Creating reviewable GitHub PR from approved changeset…';
     case 'applied':
-      return 'Apply complete. Changes verified in sandbox.';
+      return 'GitHub PR created. No cloud resources modified directly.';
     case 'failed':
       return 'Pipeline failed. See error above.';
     default:
@@ -555,6 +601,49 @@ function DiffView({ diff }: { diff: DiffResult }) {
   );
 }
 
+function AgentTrace({ trace }: { trace: ToolCallTrace[] }) {
+  if (trace.length === 0) {
+    return (
+      <div className="p-4 text-sm text-[#818691]">
+        Run analysis to see the recursive MCP tool loop.
+      </div>
+    );
+  }
+  return (
+    <div className="max-h-[430px] overflow-auto p-2">
+      <div className="space-y-2">
+        {trace.map((call) => (
+          <details key={call.id} className="rounded-xl border border-[#ececf1] bg-[#fbfcfe]">
+            <summary className="flex cursor-pointer items-center justify-between px-4 py-3 text-sm">
+              <div className="flex items-center gap-3">
+                <span className="rounded-md bg-[#f4f0ff] px-2 py-0.5 text-[10px] font-bold text-[#5b2eea]">
+                  {call.id}
+                </span>
+                <span className="font-bold text-[#111318]">{call.name}</span>
+              </div>
+              <span className="text-xs text-[#818691]">{call.durationMs}ms</span>
+            </summary>
+            <div className="border-t border-[#ececf1] px-4 py-3">
+              <div className="mb-2">
+                <div className="mb-1 text-[10px] font-black uppercase tracking-wide text-[#818691]">Arguments</div>
+                <pre className="rounded-lg bg-[#f7f7fa] p-2 font-mono text-[11px] text-[#606571]">
+                  {JSON.stringify(call.arguments, null, 2)}
+                </pre>
+              </div>
+              <div>
+                <div className="mb-1 text-[10px] font-black uppercase tracking-wide text-[#818691]">Result</div>
+                <pre className="rounded-lg bg-[#f7f7fa] p-2 font-mono text-[11px] text-[#606571]">
+                  {JSON.stringify(call.result, null, 2)}
+                </pre>
+              </div>
+            </div>
+          </details>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function hunkHeader(hunk: DiffHunk): string {
   const oldPart = hunk.oldLen === 0 ? `${hunk.oldStart},0` : `${hunk.oldStart},${hunk.oldLen}`;
   const newPart = hunk.newLen === 0 ? `${hunk.newStart},0` : `${hunk.newStart},${hunk.newLen}`;
@@ -568,6 +657,7 @@ function lineClass(line: DiffLine): string {
 }
 
 function FindingCard({ finding }: { finding: Finding }) {
+  const [showEvidence, setShowEvidence] = useState(false);
   return (
     <article className="rounded-2xl border border-[#e4e5ea] bg-white p-4 transition duration-200 hover:border-[#d4d4df] hover:shadow-sm">
       <div className="flex items-start justify-between gap-3">
@@ -588,12 +678,36 @@ function FindingCard({ finding }: { finding: Finding }) {
         <Spec label="Recommended" value={finding.recommended} tone="good" />
       </div>
 
+      <div className="mt-3 text-sm text-[#606571]">{finding.rationale}</div>
+
       <div className="mt-4 flex items-center justify-between border-t border-[#ececf1] pt-3 text-sm">
-        <span className="font-semibold text-[#606571]">Impact</span>
+        <button
+          onClick={() => setShowEvidence((s) => !s)}
+          className="inline-flex items-center gap-1.5 font-semibold text-[#7446f3] hover:underline"
+        >
+          <Info className="h-3.5 w-3.5" />
+          {showEvidence ? 'Hide evidence' : 'Show evidence'}
+        </button>
         <span className={finding.costSavings > 0 ? 'font-black text-[#159557]' : 'font-black text-[#5b2eea]'}>
           {finding.costSavings > 0 ? `$${finding.costSavings.toFixed(2)}/mo` : 'Security hardening'}
         </span>
       </div>
+
+      {showEvidence && finding.evidence && finding.evidence.length > 0 && (
+        <div className="mt-3 rounded-xl border border-[#ececf1] bg-[#fbfcfe] p-3">
+          <div className="mb-2 text-[10px] font-black uppercase tracking-wide text-[#818691]">Evidence</div>
+          <ul className="space-y-2">
+            {finding.evidence.map((ev, idx) => (
+              <li key={idx} className="text-xs text-[#606571]">
+                <span className="font-semibold text-[#111318]">{ev.type}:</span> {ev.description}
+                {ev.callIds.length > 0 && (
+                  <span className="ml-1 text-[10px] text-[#818691]">(calls: {ev.callIds.join(', ')})</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </article>
   );
 }

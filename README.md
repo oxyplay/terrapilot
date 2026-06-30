@@ -4,22 +4,23 @@ TerraPilot is an autonomous FinOps and Cloud Architecture Agent built for the
 Global AI Hackathon with Qwen Cloud. It ingests Terraform HCL, reasons over it
 with `qwen-max` through a real MCP tool-loop, grounds every recommendation in
 deterministic pricing and security data, and enforces a Human-in-the-Loop
-approval pipeline (Propose → Approve → Apply) before any change is applied.
+approval pipeline (Propose → Approve → Create PR) before any change reaches
+infrastructure.
 
 - **Agent, not a single prompt.** `qwen-max` invokes five MCP tools
   (`parseTerraform`, `estimateMonthlyCost`, `recommendInstance`,
   `checkSecurityRules`, `getInstancePricing`) in a recursive multi-round loop,
   then synthesizes findings and optimized HCL.
-- **Why `qwen-max`.** Its large context window and reasoning capabilities are
-  required to retain complex HCL dependencies while orchestrating five tools
-  without losing context.
+- **Why `qwen-max`.** We selected `qwen-max` for its larger context capacity
+  and stronger reasoning performance on multi-resource Terraform analysis and
+  iterative tool orchestration.
 - **Grounded outputs.** Savings and security findings come from deterministic
-  tool results, not the model's training data.
-- **Human-in-the-Loop.** A server-side approval token gates `apply`; changes
-  cannot be applied without explicit human approval.
-- **Enterprise fallback.** If `QWEN_API_KEY` is absent, the agent degrades
-  gracefully to a deterministic local FinOps engine so the product remains
-  operational.
+  tool results, not the model's training data. Every finding includes an
+  Evidence block with tool call IDs.
+- **Human-in-the-Loop.** A server-side approval token gates the safe output
+  action; changes cannot proceed without explicit human approval.
+- **Safe apply.** Instead of mutating cloud infrastructure directly, approved
+  changes become a reviewable GitHub Pull Request with the optimized Terraform.
 
 ---
 
@@ -39,10 +40,10 @@ flowchart TD
     mcpClient <--> mcpServer["MCP server\nsrc/mcp/server.ts"]
     mcpServer --> tools["MCP tools\nparse, cost, price, recommend, security"]
 
-    agent --> result["Structured analysis\nfindings + optimized HCL"]
+    agent --> result["Structured analysis\nfindings + optimized HCL + tool trace"]
     result --> diff["Unified diff\nproposal token + plan logs"]
     diff --> approve["POST /api/approve\nHITL approval gate"]
-    approve --> apply["POST /api/apply\napply simulation from real changeset"]
+    approve --> apply["POST /api/apply\napproved → GitHub PR"]
   end
 
   ui --> approve
@@ -174,10 +175,10 @@ The agent drives `qwen-max` through an MCP tool-loop (tools provided as OpenAI
 function-calling definitions) and parses the final structured JSON into findings
 plus optimized Terraform.
 
-`qwen-max` was chosen deliberately: its large context window and reasoning
-skills are needed to hold the full HCL dependency graph in memory while
-recursively invoking five distinct tools, correlating their outputs, and
-producing a coherent optimized configuration.
+`qwen-max` was chosen deliberately: its larger context window and stronger
+reasoning skills handle the full HCL dependency graph while recursively invoking
+five distinct tools, correlating their outputs, and producing a coherent
+optimized configuration.
 
 ---
 
@@ -187,24 +188,27 @@ TerraPilot never applies changes blindly. The pipeline is a real,
 server-validated state machine:
 
 ```
-analyze  ─►  proposed  ─►[human approves]─►  approved  ─►[apply]─►  applied
-                              (token gate)                    (gated)
+analyze  ─►  proposed  ─►[human approves]─►  approved  ─►[create PR]─►  applied
+                               (token gate)                       (gated)
 ```
 
-- `/api/analyze` returns findings, a unified diff, a plan, and an opaque
-  approval token bound to the optimized HCL.
-- `/api/approve` records the human approval (HITL checkpoint).
+- `/api/analyze` returns findings, a unified diff, a plan, an opaque
+  approval token bound to the optimized HCL, and a recursive tool trace.
+- `/api/approve` records the human approval with reviewer identity, SHA-256
+  hashes of the original and optimized HCL, and an expiry timestamp (HITL
+  checkpoint).
 - `/api/apply` refuses to run until the token is approved (`409` otherwise),
-  then produces deterministic plan/apply logs derived from the real changeset.
+  then opens a reviewable GitHub Pull Request containing the optimized
+  Terraform instead of touching cloud infrastructure directly.
 
 ### Safe AI vs Blind AI
 
 Most AI agents generate infrastructure changes and apply them immediately. That
 "Blind AI" pattern creates compliance, security, and cost risks at production
 scale. TerraPilot is built as Safe AI: every proposed change is human-approved
-through a cryptographically random token gate (`src/lib/proposals.ts`) before
-`apply` can run. Teams keep the speed of AI assistance without surrendering
-operational control.
+through a cryptographically random token gate and an auditable, durable
+proposal store (`src/lib/proposals.ts`) before any real action is taken.
+Teams keep the speed of AI assistance without surrendering operational control.
 
 ---
 

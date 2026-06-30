@@ -1,5 +1,23 @@
 export type Severity = 'critical' | 'warning' | 'info';
 
+export type PricingConfidence = 'verified' | 'estimated' | 'unknown';
+
+export interface ToolCallTrace {
+  id: string;
+  timestamp: number;
+  name: string;
+  arguments: Record<string, unknown>;
+  result: unknown;
+  durationMs: number;
+}
+
+export interface FindingEvidence {
+  type: 'pricing' | 'recommendation' | 'security' | 'cost-baseline';
+  description: string;
+  callIds: string[];
+  data?: Record<string, unknown>;
+}
+
 export interface Finding {
   resource: string;
   issue: string;
@@ -8,6 +26,8 @@ export interface Finding {
   recommended: string;
   costSavings: number;
   rationale: string;
+  evidence?: FindingEvidence[];
+  evidenceCallIds?: string[];
 }
 
 export interface AnalysisResult {
@@ -15,6 +35,7 @@ export interface AnalysisResult {
   estimatedSavings: number;
   findings: Finding[];
   optimized_terraform: string;
+  trace: ToolCallTrace[];
   _debug?: string;
 }
 
@@ -46,6 +67,8 @@ export interface PricingResult {
   monthlyUsd: number | null;
   category: string;
   estimated: boolean;
+  confidence: PricingConfidence;
+  source: string;
 }
 
 export interface Recommendation {
@@ -106,8 +129,11 @@ export type PipelineStatus =
 export type ProposalStatus = 'proposed' | 'approved' | 'applied';
 
 export interface Proposal {
+  proposalId: string;
   token: string;
   contentHash: string;
+  originalHash: string;
+  optimizedHash: string;
   original: string;
   optimized: string;
   diff: DiffResult;
@@ -116,28 +142,41 @@ export interface Proposal {
   estimatedSavings: number;
   status: ProposalStatus;
   createdAt: number;
+  expiresAt: number;
   approvedAt?: number;
+  approvedBy?: string;
   appliedAt?: number;
   applyLogs?: string[];
+  prUrl?: string;
+  prNumber?: number;
 }
 
 export interface AnalyzeResponse extends AnalysisResult {
   diff: DiffResult;
   proposalToken: string;
   contentHash: string;
+  originalHash: string;
+  optimizedHash: string;
   pipelineStatus: PipelineStatus;
   planLogs: string[];
+  expiresAt: number;
 }
 
 export interface ApproveResponse {
   token: string;
+  proposalId: string;
   status: ProposalStatus;
   approvedAt: number;
+  approvedBy: string;
+  expiresAt: number;
 }
 
 export interface ApplyResponse {
   token: string;
+  proposalId: string;
   status: ProposalStatus;
   appliedAt: number;
   logs: string[];
+  prUrl?: string;
+  prNumber?: number;
 }

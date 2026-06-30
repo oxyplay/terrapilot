@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import type { ApplyResponse } from '@/lib/types';
 import { generateApplyLogs } from '@/lib/pipeline';
 import { applyProposal, ProposalError, requireProposal } from '@/lib/proposals';
+import { createOptimizedTerraformPR, isGitHubConfigured } from '@/lib/github';
 
 export async function POST(req: NextRequest) {
   try {
@@ -13,12 +14,32 @@ export async function POST(req: NextRequest) {
 
     const proposal = requireProposal(token);
     const logs = generateApplyLogs(proposal.original, proposal.optimized);
-    const applied = applyProposal(token, logs);
+
+    let prUrl: string | undefined;
+    let prNumber: number | undefined;
+    if (isGitHubConfigured()) {
+      const pr = await createOptimizedTerraformPR(
+        proposal.original,
+        proposal.optimized,
+        proposal.findings.map((f) => `- ${f.resource}: ${f.rationale}`).join('\n'),
+        proposal.proposalId,
+      );
+      prUrl = pr.prUrl;
+      prNumber = pr.prNumber;
+      logs.push(`GitHub PR created: ${prUrl}`);
+    } else {
+      logs.push('GitHub integration not configured. Changes approved but no PR was created.');
+    }
+
+    const applied = applyProposal(token, logs, prUrl, prNumber);
     const response: ApplyResponse = {
       token: applied.token,
+      proposalId: applied.proposalId,
       status: applied.status,
       appliedAt: applied.appliedAt!,
       logs,
+      prUrl,
+      prNumber,
     };
     return NextResponse.json(response);
   } catch (error) {
@@ -26,7 +47,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
     console.error('Error in /api/apply route:', error);
-    return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
+    return NextResponse.json({ error: error instanceof Error ? error.message : 'Internal Server Error' }, { status: 500 });
   }
 }
 

@@ -1,5 +1,5 @@
 import type OpenAI from 'openai';
-import type { AnalysisResult } from './types';
+import type { AnalysisResult, ToolCallTrace } from './types';
 import { getQwenClient, getQwenModel, isQwenConfigured } from './qwen';
 import { callTool, getOpenAiTools } from '@/mcp/client';
 import { generateFallbackAnalysis } from './fallback';
@@ -28,7 +28,8 @@ After you have gathered enough evidence, produce the OPTIMIZED Terraform code by
       "current": "pg.r6.4xlarge",
       "recommended": "pg.g7.large",
       "costSavings": 505.00,
-      "rationale": "Why this change is correct, grounded in the tool results and the environment tag."
+      "rationale": "Why this change is correct, grounded in the tool results and the environment tag.",
+      "evidenceCallIds": ["tool_call_02", "tool_call_04"]
     }
   ],
   "optimized_terraform": "The complete Terraform HCL with improvements applied. Raw HCL only — no backticks, no markdown."
@@ -38,6 +39,7 @@ Rules:
 - Ground every cost figure in tool results; never invent prices.
 - If a resource has no issue, do not invent one. Fewer accurate findings beat many fabricated ones.
 - "optimized_terraform" must be valid HCL and preserve the structure of the input.
+- Every finding MUST include evidenceCallIds that reference the tool call IDs used to derive it.
 - The final message MUST be the JSON object only.`;
 
 type ChatMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
@@ -47,6 +49,10 @@ function stripJsonFences(content: string): string {
     .replace(/^```(?:json)?\s*/i, '')
     .replace(/```\s*$/i, '')
     .trim();
+}
+
+function makeTraceId(index: number): string {
+  return `tool_call_${String(index + 1).padStart(2, '0')}`;
 }
 
 export async function analyzeTerraform(terraformCode: string): Promise<AnalysisResult> {
@@ -75,6 +81,7 @@ async function runAgent(terraformCode: string): Promise<AnalysisResult> {
   const client = getQwenClient();
   const model = getQwenModel();
   const tools = await getOpenAiTools();
+  const trace: ToolCallTrace[] = [];
 
   const messages: ChatMessage[] = [
     { role: 'system', content: SYSTEM_PROMPT },
@@ -85,6 +92,7 @@ async function runAgent(terraformCode: string): Promise<AnalysisResult> {
   ];
 
   let lastContent = '';
+  let callCounter = 0;
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const response = await client.chat.completions.create({
       model,
@@ -114,12 +122,22 @@ async function runAgent(terraformCode: string): Promise<AnalysisResult> {
       } catch {
         parsedArgs = {};
       }
+      const traceId = makeTraceId(callCounter++);
+      const start = performance.now();
       let resultText = '';
       try {
         resultText = await callTool(name, parsedArgs);
       } catch (err) {
         resultText = `Tool error: ${err instanceof Error ? err.message : 'failed'}`;
       }
+      trace.push({
+        id: traceId,
+        timestamp: Date.now(),
+        name,
+        arguments: parsedArgs,
+        result: resultText,
+        durationMs: Math.round(performance.now() - start),
+      });
       messages.push({
         role: 'tool',
         tool_call_id: call.id,
@@ -135,10 +153,10 @@ async function runAgent(terraformCode: string): Promise<AnalysisResult> {
     }
   }
 
-  return parseFinalAnswer(lastContent);
+  return parseFinalAnswer(lastContent, trace);
 }
 
-function parseFinalAnswer(content: string): AnalysisResult {
+function parseFinalAnswer(content: string, trace: ToolCallTrace[]): AnalysisResult {
   if (!content) {
     throw new Error('Model returned no final content.');
   }
@@ -151,7 +169,31 @@ function parseFinalAnswer(content: string): AnalysisResult {
   return {
     summary: data.summary,
     estimatedSavings: typeof data.estimatedSavings === 'number' ? data.estimatedSavings : 0,
-    findings: data.findings,
+    findings: data.findings.map((f) => ({
+      ...f,
+      evidenceCallIds: f.evidenceCallIds ?? [],
+      evidence: f.evidence ?? buildEvidenceFromTrace(f, trace),
+    })),
     optimized_terraform: data.optimized_terraform,
+    trace,
   };
+}
+
+function buildEvidenceFromTrace(finding: AnalysisResult['findings'][number], trace: ToolCallTrace[]) {
+  const evidence: AnalysisResult['findings'][number]['evidence'] = [];
+  const relevant = trace.filter((t) => {
+    const text = JSON.stringify(t.arguments) + ' ' + JSON.stringify(t.result);
+    return (
+      text.toLowerCase().includes(String(finding.current).toLowerCase()) ||
+      text.toLowerCase().includes(String(finding.recommended).toLowerCase())
+    );
+  });
+  if (relevant.length) {
+    evidence.push({
+      type: 'recommendation',
+      description: `Derived from ${relevant.length} tool call(s) referencing this resource.`,
+      callIds: relevant.map((t) => t.id),
+    });
+  }
+  return evidence;
 }
