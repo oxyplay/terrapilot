@@ -6,13 +6,19 @@ with `qwen-max` **through a real MCP tool-loop**, grounds every recommendation i
 deterministic pricing/security data, and drives a **Human-in-the-Loop approval
 pipeline** (Propose → Approve → Apply) before any change is applied.
 
-- **Agent, not a single prompt.** Qwen invokes 5 MCP tools (parse, price,
-  recommend, secure, cost) in a multi-round loop, then synthesizes findings +
-  optimized HCL.
+- **Agent, not a single prompt.** Qwen `qwen-max` invokes 5 MCP tools
+  (`parseTerraform`, `estimateMonthlyCost`, `recommendInstance`,
+  `checkSecurityRules`, `getInstancePricing`) in a recursive multi-round loop,
+  then synthesizes findings + optimized HCL.
+- **Why `qwen-max`?** Its large context window and strong reasoning capabilities
+  are required to keep track of complex HCL resource dependencies while
+  orchestrating up to 5 different tools without losing context.
 - **Grounded, not hallucinated.** Savings figures come from the tools, not the
   model's imagination.
 - **Real HITL.** A server-side approval token gates `apply` — you cannot apply
   without an explicit human approval.
+- **Enterprise-grade fallback.** If `QWEN_API_KEY` is missing, the agent degrades
+  gracefully to a deterministic local FinOps engine, so the product always works.
 
 ---
 
@@ -43,10 +49,14 @@ flowchart TD
   apply --> ui
 ```
 
-The Qwen tool-loop: `parseTerraform` → `estimateMonthlyCost` → `recommendInstance`
-(per resource) → `checkSecurityRules` → synthesize findings + optimized HCL.
-If `QWEN_API_KEY` is absent, a deterministic local FinOps engine handles it
-(fallback mode) so the app always works.
+The Qwen tool-loop: `parseTerraform` → `estimateMonthlyCost` →
+`recommendInstance` (per resource) → `checkSecurityRules` → synthesize
+findings + optimized HCL.
+
+If `QWEN_API_KEY` is absent, the agent falls back to a deterministic local
+FinOps engine. This graceful degradation is treated as a feature, not a bug:
+production systems must keep operating when an upstream provider is unavailable,
+so TerraPilot can be evaluated and deployed even without a key.
 
 ---
 
@@ -62,6 +72,15 @@ Exposed by `src/mcp/` as a standalone MCP server (`npm run mcp`) and consumed
 | `recommend_instance` | Deterministic rightsizing heuristics (dev → smaller class) |
 | `check_security_rules` | Detects admin ports open to `0.0.0.0/0` |
 | `estimate_monthly_cost` | Total monthly cost baseline for all billable resources |
+
+### In-Memory MCP Transport Layer
+
+Instead of opening raw network ports locally, the MCP server is launched inside
+the same Node.js process and connected to the agent through `InMemoryTransport`
+(`src/mcp/client.ts`). This removes local socket exposure, removes startup
+latency from TCP handshake / stdio spawning, and keeps the entire tool surface
+inside the application security boundary — a safer and lower-latency architecture
+for an AI agent that calls tools recursively.
 
 ---
 
@@ -116,8 +135,10 @@ QWEN_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1
 QWEN_MODEL=qwen-max
 ```
 > [!NOTE]
-> **Fallback mode**: if `QWEN_API_KEY` is empty, the deterministic local FinOps
-> engine handles analysis so the app runs out-of-the-box for evaluation.
+> **Fallback mode (Enterprise resilience)**: if `QWEN_API_KEY` is empty, the
+> deterministic local FinOps engine handles analysis so the app runs
+> out-of-the-box for evaluation. The system degrades gracefully instead of
+> failing hard when the upstream LLM provider is unavailable.
 
 ### 3. Run
 ```bash
@@ -148,6 +169,11 @@ The agent drives `qwen-max` through an MCP tool-loop (tools provided as OpenAI
 function-calling definitions) and parses the final structured JSON into findings
 + optimized Terraform.
 
+`qwen-max` was chosen deliberately: its large context window and strong logical
+reasoning skills are needed to hold the full HCL dependency graph in memory while
+recursively invoking 5 distinct tools, correlating their outputs, and producing
+a coherent optimized configuration.
+
 ---
 
 ## 🔒 Human-in-the-Loop Pipeline
@@ -157,7 +183,7 @@ server-validated state machine:
 
 ```
 analyze  ─►  proposed  ─►[human approves]─►  approved  ─►[apply]─►  applied
-                              (token gate)                    (gated)
+                               (token gate)                    (gated)
 ```
 
 - `/api/analyze` returns findings, a unified **diff**, a **plan**, and an opaque
@@ -166,6 +192,15 @@ analyze  ─►  proposed  ─►[human approves]─►  approved  ─►[apply]
 - `/api/apply` **refuses to run** until the token is approved (`409` otherwise),
   then produces deterministic plan/apply logs derived from the real changeset —
   not a scripted animation.
+
+### Blind AI vs Safe AI
+
+Most AI agents generate infrastructure changes and apply them immediately. That
+"Blind AI" pattern creates compliance, security, and cost risks at production
+scale. TerraPilot is built as **Safe AI**: every proposed change is
+human-approved through a cryptographically random token gate (`src/lib/proposals.ts`)
+before `apply` can run. Teams keep the speed of AI assistance without surrendering
+operational control.
 
 ---
 
