@@ -68,12 +68,24 @@ Exposed by `src/mcp/` as a standalone MCP server (`npm run mcp`) and consumed
 in-process by the agent via the in-memory transport.
 
 | Tool | Purpose |
-|---|---|
+|---|---|---|
 | `parseTerraform` | HCL → structured resources (type, name, kind, attributes) |
-| `getInstancePricing` | Monthly USD for an instance type (real table + heuristic) |
+| `getInstancePricing` | Monthly USD lookup with explicit confidence level (verified / estimated / unknown) |
 | `recommendInstance` | Deterministic rightsizing heuristics (dev → smaller class) |
 | `checkSecurityRules` | Detects admin ports open to `0.0.0.0/0` |
 | `estimateMonthlyCost` | Total monthly cost baseline for all billable resources |
+
+### Pricing confidence
+
+`getInstancePricing` returns a `confidence` field so findings can be audited:
+
+- **Verified** — exact match in the internal TerraPilot pricing catalog.
+- **Estimated** — derived from a family-level heuristic; not a live API quote.
+- **Unknown** — resource type is not supported by the current catalog.
+
+Catalog metadata (source, update date, supported clouds/regions, and the
+`monthlyUsd = hourlyUsd × 730` formula) is returned by `getPricingCatalogMeta`
+and surfaced in the dashboard Evidence panel.
 
 ### In-Memory MCP Transport Layer
 
